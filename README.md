@@ -198,6 +198,21 @@ ENV_FILE="/etc/backup/production.env" ./backup.sh
 DEST="/mnt/storage/backups" SEND_EMAIL=1 NOTIFY_EMAIL="admin@example.com" ./backup.sh
 ```
 
+### Configuration & Login Verification (`--verify-config`)
+
+You can validate your entire setup, directory access, tool dependencies, and live database logins without performing a backup or writing files:
+
+```bash
+./backup.sh --verify-config
+```
+
+This verifies:
+1. **Core Utilities**: Checks existence of `tar`, `gzip`, `df`, `find`, `grep`, etc.
+2. **Storage & Paths**: Validates write permissions on `DEST` and existence of directories in `DIRS_FILE`.
+3. **Database Logins**: Connects to each configured MySQL / PostgreSQL / SQLite instance (locally or inside Docker), executes a test query (`SELECT 1;` / `PRAGMA integrity_check`), and lists discoverable databases.
+4. **Cloud Connectivity**: Tests connection to `CLOUD_TARGET` via `rclone`.
+5. **Notification Binary**: Checks `mail` command availability if `SEND_EMAIL=1`.
+
 ### Automated Scheduling
 
 #### Option A: Systemd Timer (Recommended)
