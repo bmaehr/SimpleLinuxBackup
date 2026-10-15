@@ -451,6 +451,10 @@ backup_databases() {
     local discovery_cmd=""
     if [[ "$type" == "mysql" ]]; then
       if [[ -n "${AUTH_FILE}" ]]; then
+        if ! run_inner "test -f '${AUTH_FILE}'" &>/dev/null; then
+          log_error "Skipping ${conf}: AUTH_FILE '${AUTH_FILE}' does not exist or is not readable."
+          continue
+        fi
         AUTH_ADD="--defaults-extra-file='${AUTH_FILE}'"
       else
         if [[ -n "${AUTH_USERNAME}" ]]; then
@@ -461,15 +465,41 @@ backup_databases() {
           fi
         fi
       fi
+
+      # Verify MySQL connection & credentials
+      local test_cmd="${LIST_COMMAND} ${AUTH_ADD} -h '${DB_HOST}' -Bse 'SELECT 1;'"
+      local test_out
+      if ! test_out="$(run_inner "${test_cmd}" 2>&1)"; then
+        log_error "Skipping ${conf}: MySQL login on '${DB_HOST}' failed: ${test_out}"
+        continue
+      elif [ "${VERIFY_CONFIG:-0}" -eq 1 ]; then
+        echo "  [OK] MySQL login on '${DB_HOST}' successful."
+      fi
+
       discovery_cmd="${LIST_COMMAND} ${AUTH_ADD} -h '${DB_HOST}' -Bse 'SHOW DATABASES'"
     elif [[ "$type" == "pgsql" ]]; then
       if [[ -n "${AUTH_FILE}" ]]; then
+        if ! run_inner "test -f '${AUTH_FILE}'" &>/dev/null; then
+          log_error "Skipping ${conf}: AUTH_FILE '${AUTH_FILE}' does not exist or is not readable."
+          continue
+        fi
         AUTH_ADD="PGPASSFILE='${AUTH_FILE}'"
       else
         if [[ -n "${AUTH_PASSWORD}" ]]; then
           AUTH_ADD="PGPASSWORD='${AUTH_PASSWORD}'"
         fi
       fi
+
+      # Verify PostgreSQL connection & credentials
+      local test_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c 'SELECT 1;'"
+      local test_out
+      if ! test_out="$(run_inner "${test_cmd}" 2>&1)"; then
+        log_error "Skipping ${conf}: PostgreSQL login on '${DB_HOST}' failed: ${test_out}"
+        continue
+      elif [ "${VERIFY_CONFIG:-0}" -eq 1 ]; then
+        echo "  [OK] PostgreSQL login on '${DB_HOST}' successful."
+      fi
+
       discovery_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false;\""
     else
       if [[ -n "${SQLITE_DIR}" ]]; then
@@ -511,11 +541,26 @@ backup_databases() {
             ERROR_COUNT=$((ERROR_COUNT + 1))
           fi
         done
-      else
-        echo "  [OK] ${type} connection & discovery successful for $(basename "${conf}")."
-        local db_count
-        db_count=$(echo "${DBS}" | wc -w)
-        echo "       Databases found (${db_count}): $(echo "${DBS}" | tr '\n' ' ')"
+      elif [[ "$type" == "mysql" ]]; then
+        for db_name in ${DBS}; do
+          local check_db_cmd="${LIST_COMMAND} ${AUTH_ADD} -h '${DB_HOST}' -Bse 'USE \`${db_name}\`;'"
+          local check_out
+          if check_out="$(run_inner "${check_db_cmd}" 2>&1)"; then
+            echo "  [OK] MySQL database accessible: ${db_name}"
+          else
+            log_error "MySQL database '${db_name}' in ${conf} not accessible: ${check_out}"
+          fi
+        done
+      elif [[ "$type" == "pgsql" ]]; then
+        for db_name in ${DBS}; do
+          local check_db_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -d '${db_name}' -At -c 'SELECT 1;'"
+          local check_out
+          if check_out="$(run_inner "${check_db_cmd}" 2>&1)"; then
+            echo "  [OK] PostgreSQL database accessible: ${db_name}"
+          else
+            log_error "PostgreSQL database '${db_name}' in ${conf} not accessible: ${check_out}"
+          fi
+        done
       fi
       continue
     fi
