@@ -1,0 +1,22 @@
+# SQLite backup configuration (Docker container instance)
+# Filename pattern must match: backup_sqlite_*.conf
+
+# Docker settings
+DOCKER_CONTAINER="my-app"
+DOCKER_USER=""
+DOCKER_SHELL="/bin/sh"
+DOCKER_OPTS=""
+
+# Directory inside the container to scan for SQLite databases (*.sqlite, *.sqlite3, *.db)
+# Or specify explicit database paths in DBS below.
+SQLITE_DIR="/app/data"
+
+# Optional: explicitly list SQLite file paths inside the container (space-separated)
+# DBS="/app/data/production.db"
+DBS=""
+
+# Optional: extra options passed to sqlite3 .dump
+DUMP_OPTS=""
+
+# Optional: databases or file paths to ignore
+IGNORED_DBS=""

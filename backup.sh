@@ -2,37 +2,60 @@
 
 #set -euo pipefail
 
-# Modify the variables below to your need
-CONF_PATH="/etc/backup"
+# === Load Environment File (.env) ===
+ENV_FILE="${ENV_FILE:-}"
+if [[ -z "${ENV_FILE}" ]]; then
+  SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+  if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+    ENV_FILE="${SCRIPT_DIR}/.env"
+  elif [[ -f "${CONF_PATH:-/etc/backup}/.env" ]]; then
+    ENV_FILE="${CONF_PATH:-/etc/backup}/.env"
+  elif [[ -f "./.env" ]]; then
+    ENV_FILE="./.env"
+  fi
+fi
 
-# Owner of backup dir
-OWNER="root"
-# Group of backup dir
-GROUP="root"
-# Backup Dest directory, change this if you have someother location
-DEST="/root/backup/vserver"
+if [[ -n "${ENV_FILE}" && -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "${ENV_FILE}"
+  set +a
+fi
 
-# Filesystem
-DIRS_FILE="${CONF_PATH}/backup_dirs.lst"
-DIRS_EXCLUDE_FILE="${CONF_PATH}/backup_dirs_exclude.lst"
+# Configuration path
+CONF_PATH="${CONF_PATH:-/etc/backup}"
 
-# Send Result EMail
-SEND_EMAIL=1
-NOTIFY_EMAIL="root@bmaehr.com"
-NOTIFY_SUBJECT="Backup Notification"
+# Owner and group of backup directory
+OWNER="${OWNER:-root}"
+GROUP="${GROUP:-root}"
 
-# Delete old backups
-DELETE_OLD_BACKUPS=1
-DELETE_BACKUPS_OLDER_THAN_DAYS=5
+# Destination directory for backups
+DEST="${DEST:-/var/backups}"
 
-# Cloud
-CLOUD_TARGET=encrypted_gdrive_backup_machine:vserver
+# Filesystem backup lists
+DIRS_FILE="${DIRS_FILE:-${CONF_PATH}/backup_dirs.lst}"
+DIRS_EXCLUDE_FILE="${DIRS_EXCLUDE_FILE:-${CONF_PATH}/backup_dirs_exclude.lst}"
 
 # Get hostname
-HOST="$(hostname)"
+HOST="${HOST:-$(hostname)}"
 
-# Get data in yyyy-mm-dd format
-NOW="$(date +"%Y%m%d")"
+# Send result email
+SEND_EMAIL="${SEND_EMAIL:-0}"
+NOTIFY_EMAIL="${NOTIFY_EMAIL:-root@localhost}"
+NOTIFY_SUBJECT="${NOTIFY_SUBJECT:-Backup Notification (${HOST})}"
+
+# Delete old backups
+DELETE_OLD_BACKUPS="${DELETE_OLD_BACKUPS:-1}"
+DELETE_BACKUPS_OLDER_THAN_DAYS="${DELETE_BACKUPS_OLDER_THAN_DAYS:-5}"
+
+# Cloud target (rclone remote:path, optional)
+CLOUD_TARGET="${CLOUD_TARGET:-}"
+
+# Lock file to prevent overlapping runs
+LOCK_FILE="${LOCK_FILE:-/run/lock/simplelinuxbackup.lock}"
+
+# Get date in yyyy-mm-dd format
+NOW="${NOW:-$(date +"%Y%m%d")}"
 
 DB_TIMES=()
 DIR_TIMES=()
@@ -41,10 +64,11 @@ UPLOAD_TIMES=()
 # === Functions ===
 
 init_commands() {
-  LIST_COMMAND_MYSQL="$(which mysql)"
-  LIST_COMMAND_PGSQL="$(which psql)"
-  DUMP_COMMAND_MYSQL="$(which mysqldump)"
-  DUMP_COMMAND_PGSQL="$(which pg_dump)"
+  LIST_COMMAND_MYSQL="$(which mysql 2>/dev/null || true)"
+  LIST_COMMAND_PGSQL="$(which psql 2>/dev/null || true)"
+  DUMP_COMMAND_MYSQL="$(which mysqldump 2>/dev/null || true)"
+  DUMP_COMMAND_PGSQL="$(which pg_dump 2>/dev/null || true)"
+  DUMP_COMMAND_SQLITE="$(which sqlite3 2>/dev/null || true)"
   GREP_COMMAND="$(which grep)"
   CHOWN_COMMAND="$(which chown)"
   CHMOD_COMMAND="$(which chmod)"
@@ -56,7 +80,7 @@ init_commands() {
   RCLONE_COMMAND="$(which rclone)"
   DOCKER_COMMAND="$(which docker)"
 
-  export LIST_COMMAND_MYSQL LIST_COMMAND_DEFAULT_PGSQL DUMP_COMMAND_MYSQL DUMP_COMMAND_DEFAULT_PGSQL \
+  export LIST_COMMAND_MYSQL LIST_COMMAND_PGSQL DUMP_COMMAND_MYSQL DUMP_COMMAND_PGSQL DUMP_COMMAND_SQLITE \
     GREP_COMMAND CHOWN_COMMAND CHMOD_COMMAND GZIP_COMMAND TAR_COMMAND MAIL_COMMAND FIND_COMMAND DF_COMMAND RCLONE_COMMAND DOCKER_COMMAND
 }
 
@@ -89,11 +113,40 @@ init_backup_dirs() {
   fi
 }
 
+acquire_lock() {
+  if command -v flock &>/dev/null; then
+    local lock_dir
+    lock_dir="$(dirname "${LOCK_FILE}")"
+    if [[ ! -d "${lock_dir}" || ! -w "${lock_dir}" ]]; then
+      LOCK_FILE="/tmp/simplelinuxbackup.lock"
+    fi
+    exec 200>"${LOCK_FILE}"
+    if ! flock -n 200; then
+      echo "Error: Another instance of simplelinuxbackup is already running. Exiting." >&2
+      exit 1
+    fi
+  fi
+}
+
+cleanup() {
+  if [[ -n "${TMP_MSG_FILE:-}" && -f "${TMP_MSG_FILE}" ]]; then
+    rm -f "${TMP_MSG_FILE}"
+  fi
+  if [[ -n "${CURRENT_EXCLUDE_FILE:-}" && -f "${CURRENT_EXCLUDE_FILE}" ]]; then
+    rm -f "${CURRENT_EXCLUDE_FILE}"
+  fi
+}
+
 init_tmp_msg() {
-  # Temp Message file
-  TMP_MSG_FILE="/tmp/${RANDOM}.msg"
+  if command -v mktemp &>/dev/null; then
+    TMP_MSG_FILE="$(mktemp /tmp/backup.XXXXXX.msg)"
+  else
+    TMP_MSG_FILE="/tmp/backup.$$.${RANDOM}.msg"
+    : > "${TMP_MSG_FILE}"
+  fi
 
   export TMP_MSG_FILE
+  trap cleanup EXIT INT TERM
 }
 
 ###############################################################################
@@ -139,7 +192,10 @@ discover_dbs() {
 backup_db() {
   local dump_cmd="$1" outfile="${2:?}"
 
-  if ! run_inner "${dump_cmd}" | env -u GZIP "${GZIP_COMMAND}" -9 > "$outfile"; then
+  run_inner "${dump_cmd}" | env -u GZIP "${GZIP_COMMAND}" -9 > "$outfile"
+  local pipe_status=("${PIPESTATUS[@]}")
+  if [[ ${pipe_status[0]} -ne 0 || ${pipe_status[1]} -ne 0 ]]; then
+    rm -f "$outfile"
     return 1
   fi
 }
@@ -155,7 +211,7 @@ should_skip_db() {
 backup_databases() {
   shopt -s nullglob
 
-  for conf in "${CONF_PATH}"/backup_mysql_*.conf "${CONF_PATH}"/backup_pgsql_*.conf; do
+  for conf in "${CONF_PATH}"/backup_mysql_*.conf "${CONF_PATH}"/backup_pgsql_*.conf "${CONF_PATH}"/backup_sqlite_*.conf; do
     [ -e "${conf}" ] || continue
 
     # detect type from filename
@@ -163,6 +219,7 @@ backup_databases() {
     case "$(basename -- "${conf}")" in
       backup_mysql_*.conf)      type="mysql" ;;
       backup_pgsql_*.conf)      type="pgsql" ;;
+      backup_sqlite_*.conf)     type="sqlite" ;;
       *)                        continue ;;
     esac
 
@@ -175,16 +232,23 @@ backup_databases() {
     local DUMP_COMMAND=""
     local DUMP_OPTS=""
     local IGNORED_DBS=""
+    local SQLITE_DIR=""
     if [ "${type}" = "mysql" ]; then
       LIST_COMMAND="${LIST_COMMAND_MYSQL}"
       DUMP_COMMAND="${DUMP_COMMAND_MYSQL}"
       DUMP_OPTS="-Q --skip-lock-tables --single-transaction"
       IGNORED_DBS="information_schema performance_schema mysql sys"
-    else
+    elif [ "${type}" = "pgsql" ]; then
       LIST_COMMAND="${LIST_COMMAND_PGSQL}"
       DUMP_COMMAND="${DUMP_COMMAND_PGSQL}"
       DUMP_OPTS=""
       IGNORED_DBS="template0 template1 postgres"
+    else
+      LIST_COMMAND=""
+      DUMP_COMMAND="${DUMP_COMMAND_SQLITE:-sqlite3}"
+      DUMP_OPTS=""
+      IGNORED_DBS=""
+      SQLITE_DIR=""
     fi
     local DBS=""
     # optional Docker knobs (per conf)
@@ -197,6 +261,7 @@ backup_databases() {
     . "${conf}"
 
     local AUTH_ADD=""
+    local discovery_cmd=""
     if [[ "$type" == "mysql" ]]; then
       if [[ -n "${AUTH_FILE}" ]]; then
         AUTH_ADD="--defaults-extra-file='${AUTH_FILE}'"
@@ -210,23 +275,33 @@ backup_databases() {
         fi
       fi
       discovery_cmd="${LIST_COMMAND} ${AUTH_ADD} -h '${DB_HOST}' -Bse 'SHOW DATABASES'"
+    elif [[ "$type" == "pgsql" ]]; then
+      if [[ -n "${AUTH_FILE}" ]]; then
+        AUTH_ADD="PGPASSFILE='${AUTH_FILE}'"
+      else
+        if [[ -n "${AUTH_PASSWORD}" ]]; then
+          AUTH_ADD="PGPASSWORD='${AUTH_PASSWORD}'"
+        fi
+      fi
+      discovery_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false;\""
     else
-     if [[ -n "${AUTH_FILE}" ]]; then
-       AUTH_ADD="PGPASSFILE='${AUTH_FILE}'"
-     else
-       if [[ -n "${AUTH_PASSWORD}" ]]; then
-         AUTH_ADD="PGPASSWORD='${AUTH_PASSWORD}'"
-       fi
-     fi
-     discovery_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false;\""
+      if [[ -n "${SQLITE_DIR}" ]]; then
+        discovery_cmd="find '${SQLITE_DIR}' -maxdepth 3 -type f \\( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \\)"
+      fi
     fi
 
     # determine DB list (explicit or discovered; docker-aware)
     if [[ -z "${DBS:-}" ]]; then
+      if [[ "$type" == "sqlite" && -z "${SQLITE_DIR:-}" ]]; then
+        gen_email 1 "Skipping ${conf}: sqlite requires either DBS or SQLITE_DIR."
+        echo "Skipping ${conf}: sqlite requires either DBS or SQLITE_DIR."
+        continue
+      fi
+
       echo "Getting databases for ${conf} ..."
 
       if ! DBS="$(discover_dbs "${discovery_cmd}")"; then
-        gen_email "${SEND_EMAIL}" "${TMP_MSG_FILE}" 1 "Skipping ${conf}: ${type} discovery failed."
+        gen_email 1 "Skipping ${conf}: ${type} discovery failed."
         echo "Skipping ${conf}: ${type} discovery failed."
         continue
       fi
@@ -239,15 +314,26 @@ backup_databases() {
         continue
       fi
 
-      outfile="${MBD}/db.${type}.${DB}.gz"
+      if [[ "$type" == "sqlite" ]]; then
+        local db_clean
+        db_clean="${DB#/}"
+        db_clean="${db_clean//\//_}"
+        outfile="${MBD}/db.${type}.${db_clean}.gz"
+      else
+        outfile="${MBD}/db.${type}.${DB}.gz"
+      fi
+
       ok=0
       start_ts=$(date +%s)
       echo "Compressing database ${DB} ..."
 
       if [[ "$type" == "mysql" ]]; then
         dump_cmd="${DUMP_COMMAND} ${AUTH_ADD} ${DUMP_OPTS} -h '${DB_HOST}' '${DB}'"
-      else
+      elif [[ "$type" == "pgsql" ]]; then
         dump_cmd="${AUTH_ADD} ${DUMP_COMMAND} ${DUMP_OPTS} -U '${AUTH_USERNAME}' -h '${DB_HOST}' '${DB}'"
+      else
+        local sqlite_bin="${DUMP_COMMAND:-sqlite3}"
+        dump_cmd="${sqlite_bin} ${DUMP_OPTS} '${DB}' .dump"
       fi
 
       if backup_db "${dump_cmd}" "${outfile}" ; then
@@ -276,17 +362,68 @@ backup_databases() {
 }
 
 backup_filesystem() {
+  if [ ! -f "${DIRS_FILE}" ]; then
+    echo "Directory list file '${DIRS_FILE}' not found, skipping filesystem backup."
+    return 0
+  fi
+
+  local base_tar_opts=()
+  if [ -n "${DEST}" ]; then
+    base_tar_opts+=("--exclude=${DEST}")
+  fi
+
   while IFS= read -r DIR || [ -n "${DIR}" ]; do
     # skip empty lines and comments
     [ -z "${DIR}" ] && continue
     [[ "${DIR}" =~ ^# ]] && continue
 
+    # Strip trailing slashes (except for root "/")
+    while [[ "${DIR}" != "/" && "${DIR}" == */ ]]; do
+      DIR="${DIR%/}"
+    done
+
     start_ts=$(date +%s)
     echo "Compressing directory ${DIR} ..."
 
-    LAST_DIR_NAME=${DIR##*/}
-    ${TAR_COMMAND} -cpzf ${MBD}/${LAST_DIR_NAME}.tar.gz --exclude-from=${DIRS_EXCLUDE_FILE} --one-file-system ${DIR}
+    if [[ "${DIR}" == "/" ]]; then
+      LAST_DIR_NAME="root_fs"
+    else
+      LAST_DIR_NAME="${DIR##*/}"
+    fi
+
+    local current_tar_opts=("${base_tar_opts[@]}")
+
+    # Build per-directory exclude list to prevent parent exclusions from suppressing subdirectories
+    if [ -f "${DIRS_EXCLUDE_FILE}" ]; then
+      if command -v mktemp &>/dev/null; then
+        CURRENT_EXCLUDE_FILE="$(mktemp /tmp/backup_exclude.XXXXXX)"
+      else
+        CURRENT_EXCLUDE_FILE="/tmp/backup_exclude.$$.${RANDOM}"
+      fi
+
+      while IFS= read -r pattern || [ -n "${pattern}" ]; do
+        [ -z "${pattern}" ] && continue
+        [[ "${pattern}" =~ ^# ]] && continue
+
+        local clean_pattern="${pattern%/}"
+        # If the directory being backed up is equal to or inside the excluded path,
+        # skip this exclude rule so it does not suppress the target directory
+        if [[ "${DIR}" == "${clean_pattern}" || "${DIR}" == "${clean_pattern}"/* ]]; then
+          continue
+        fi
+        echo "${pattern}" >> "${CURRENT_EXCLUDE_FILE}"
+      done < "${DIRS_EXCLUDE_FILE}"
+
+      current_tar_opts+=("--exclude-from=${CURRENT_EXCLUDE_FILE}")
+    fi
+
+    ${TAR_COMMAND} -cpzf "${MBD}/${LAST_DIR_NAME}.tar.gz" "${current_tar_opts[@]}" --one-file-system "${DIR}"
     ERR=$?
+
+    if [ -n "${CURRENT_EXCLUDE_FILE:-}" ] && [ -f "${CURRENT_EXCLUDE_FILE}" ]; then
+      rm -f "${CURRENT_EXCLUDE_FILE}"
+      CURRENT_EXCLUDE_FILE=""
+    fi
     
     end_ts=$(date +%s)
     diff=$(( end_ts - start_ts ))
@@ -306,7 +443,27 @@ backup_filesystem() {
 }
 
 upload_to_cloud() {
-  for BACKUPFILE in ${MBD}/*.gz; do
+  if [[ -z "${CLOUD_TARGET}" ]]; then
+    echo "CLOUD_TARGET is not configured, skipping cloud upload."
+    return 0
+  fi
+
+  if [[ -z "${RCLONE_COMMAND}" ]]; then
+    echo "Warning: rclone command not found, skipping cloud upload."
+    gen_email 1 "Warning: rclone command not found, skipping cloud upload."
+    return 1
+  fi
+
+  shopt -s nullglob
+  local backup_files=("${MBD}"/*.gz)
+  shopt -u nullglob
+
+  if [[ ${#backup_files[@]} -eq 0 ]]; then
+    echo "No backup files found in ${MBD} to upload."
+    return 0
+  fi
+
+  for BACKUPFILE in "${backup_files[@]}"; do
     start_ts=$(date +%s)
     echo "Uploading file ${BACKUPFILE} to cloud ..."
 
@@ -371,13 +528,13 @@ log_times() {
 
 delete_old_backups() {
   # Delete old backups
-  if [ ${DELETE_OLD_BACKUPS} -eq 1 ]; then
-    "${FIND_COMMAND}" "${DEST}" -maxdepth 1 -mtime +${DELETE_BACKUPS_OLDER_THAN_DAYS} -type d | ${GREP_COMMAND} -v "^${DEST}$" | while read DIR; do
+  if [ "${DELETE_OLD_BACKUPS}" -eq 1 ]; then
+    "${FIND_COMMAND}" "${DEST}" -maxdepth 1 -mtime "+${DELETE_BACKUPS_OLDER_THAN_DAYS}" -type d | ${GREP_COMMAND} -v "^${DEST}$" | while read -r DIR; do
       gen_email 0 "Deleting: ${DIR}: "
       echo -n "Deleting: ${DIR}: "
       rm -rf "${DIR}" 
       ERR=$?
-      if [ ${ERR} != 0 ]; then
+      if [ ${ERR} -ne 0 ]; then
         NOTIFY_MESSAGE="ERROR"
       else
         NOTIFY_MESSAGE="OK"
@@ -401,13 +558,18 @@ append_disk_stats() {
 send_notification() {
   # Sending notification email
   if [[ "${SEND_EMAIL:-0}" == "1" ]]; then
-    ${MAIL_COMMAND} -s "${NOTIFY_SUBJECT}" "${NOTIFY_EMAIL}" < "${TMP_MSG_FILE}"
+    if [[ -n "${MAIL_COMMAND}" ]]; then
+      ${MAIL_COMMAND} -s "${NOTIFY_SUBJECT}" "${NOTIFY_EMAIL}" < "${TMP_MSG_FILE}"
+    else
+      echo "Warning: SEND_EMAIL is 1, but no mail command (mailx, mail, sendmail) was found."
+    fi
   fi
   rm -f "${TMP_MSG_FILE}"
 }
 
 
 # === Main ===
+acquire_lock
 init_commands
 init_backup_dirs
 init_tmp_msg

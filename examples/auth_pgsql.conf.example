@@ -1,0 +1,4 @@
+# Example PostgreSQL password file (pgpass format)
+# Format: hostname:port:database:username:password
+# Permissions MUST be: chmod 600 auth_pgsql.conf
+localhost:5432:*:postgres:your_password_here

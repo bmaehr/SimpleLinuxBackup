@@ -1,0 +1,17 @@
+# SQLite backup configuration (Local instance)
+# Filename pattern must match: backup_sqlite_*.conf
+
+# Directory to scan for SQLite databases (*.sqlite, *.sqlite3, *.db)
+# Or specify explicit database paths in DBS below.
+SQLITE_DIR="/var/lib/sqlite"
+
+# Optional: explicitly list SQLite file paths (space-separated)
+# If set, SQLITE_DIR discovery is bypassed.
+# DBS="/var/lib/sqlite/app.db /var/www/site/data.sqlite3"
+DBS=""
+
+# Optional: extra options passed to sqlite3 .dump
+DUMP_OPTS=""
+
+# Optional: databases or file paths to ignore
+IGNORED_DBS=""

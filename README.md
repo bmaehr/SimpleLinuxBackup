@@ -1,93 +1,240 @@
 # SimpleLinuxBackup
 
+A modular, lightweight Bash backup solution for Linux servers supporting filesystem archiving, multi-database dumps (MySQL/MariaDB, PostgreSQL, SQLite) either locally or inside Docker containers, automated cloud uploads via rclone, retention pruning, and status notifications.
 
+---
 
-## Getting started
+## Features
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+* **Database Backups:**
+  * Supports **MySQL / MariaDB**, **PostgreSQL**, and **SQLite**.
+  * Executes either locally on the host or inside **Docker containers** via `docker exec`.
+  * Automatic database discovery (`SHOW DATABASES`, `pg_database`, or filesystem scan for SQLite `.sqlite`, `.sqlite3`, `.db`) with built-in exclusion of system schemas (`information_schema`, `template1`, etc.).
+  * Direct stream compression (`gzip -9`) with pipeline exit code verification.
+* **Filesystem Backups:**
+  * Archives specified directories into `.tar.gz`.
+  * Supports exclude patterns via `--exclude-from`.
+  * Respects filesystem boundaries (`--one-file-system`).
+* **Cloud Storage Sync:**
+  * Optional upload to any cloud provider supported by [`rclone`](https://rclone.org/) (S3, Google Drive, Backblaze B2, SFTP, etc.).
+* **Retention & Pruning:**
+  * Automated cleanup of backup directories older than a configurable number of days.
+* **Safety & Concurrency:**
+  * Process locking via `flock` to prevent overlapping runs.
+  * Destination folder (`$DEST`) is automatically excluded from filesystem tar operations to prevent recursion.
+  * Temporary files use `mktemp` with `EXIT`/`TERM`/`INT` traps for guaranteed cleanup.
+* **Reporting & Notifications:**
+  * Detailed execution timing metrics per database, directory, and upload.
+  * Disk usage overview (`df -h`).
+  * Email notification delivery via `mailx`, `mail`, or `sendmail`.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## Requirements
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+The script automatically detects required tools on `$PATH`:
 
+* Core utilities: `bash`, `tar`, `gzip`, `find`, `df`, `grep`, `chmod`, `chown`, `flock`, `mktemp`
+* Database clients (optional, needed if backing up local databases): `mysql`, `mysqldump`, `psql`, `pg_dump`, `sqlite3`
+* Docker CLI (optional, needed if backing up containerized databases): `docker`
+* Remote sync (optional, needed for cloud upload): `rclone`
+* Mail utility (optional, needed for email alerts): `mailx`, `mail`, or `sendmail`
+
+---
+
+## Configuration
+
+### Environment File (`.env`)
+
+SimpleLinuxBackup automatically loads a `.env` file if present. It checks the following locations in order:
+1. Custom path specified via `ENV_FILE` (e.g. `ENV_FILE=/path/to/.env ./backup.sh`)
+2. Script directory (`<script_dir>/.env`)
+3. Configuration directory (`${CONF_PATH}/.env` or `/etc/backup/.env`)
+4. Current working directory (`./.env`)
+
+A template is provided in [`examples/.env.example`](examples/.env.example).
+
+### Environment Variables
+
+All parameters can be configured via `.env` or set directly in your environment:
+
+| Variable | Description | Default |
+|---|---|---|
+| `CONF_PATH` | Path containing configuration and list files | `/etc/backup` |
+| `DEST` | Local directory where backups are stored | `/var/backups` |
+| `OWNER` | User owner of the backup destination | `root` |
+| `GROUP` | Group owner of the backup destination | `root` |
+| `DIRS_FILE` | File containing directories to archive | `${CONF_PATH}/backup_dirs.lst` |
+| `DIRS_EXCLUDE_FILE` | File containing tar exclusion patterns | `${CONF_PATH}/backup_dirs_exclude.lst` |
+| `LOCK_FILE` | Concurrency lock file | `/run/lock/simplelinuxbackup.lock` |
+| `HOST` | Hostname included in notifications | `$(hostname)` |
+| `SEND_EMAIL` | Set to `1` to enable email reporting | `0` |
+| `NOTIFY_EMAIL` | Target email address for backup reports | `root@localhost` |
+| `NOTIFY_SUBJECT` | Email subject line | `Backup Notification (${HOST})` |
+| `DELETE_OLD_BACKUPS` | Set to `1` to enable pruning of old backups | `1` |
+| `DELETE_BACKUPS_OLDER_THAN_DAYS` | Retention duration in days | `5` |
+| `CLOUD_TARGET` | Rclone remote destination (e.g. `remote:bucket/path`) | *(empty, disabled)* |
+| `NOW` | Backup date folder format (`YYYYMMDD`) | `$(date +"%Y%m%d")` |
+| `ENV_FILE` | Path to an explicit `.env` file to load | *(optional)* |
+
+---
+
+## Setup & File Formats
+
+Template files are available in the [examples/](examples/) directory.
+
+### 1. Filesystem Configuration
+
+* **`backup_dirs.lst`**: List absolute directories to back up (one per line):
+  ```text
+  /etc
+  /var/www
+  /home
+  ```
+* **`backup_dirs_exclude.lst`**: (Optional) Patterns to exclude from tar:
+  ```text
+  *.log
+  *.tmp
+  cache/
+  node_modules/
+  ```
+
+### 2. Database Configurations
+
+The script scans for configuration files matching:
+* `${CONF_PATH}/backup_mysql_*.conf` (MySQL / MariaDB)
+* `${CONF_PATH}/backup_pgsql_*.conf` (PostgreSQL)
+* `${CONF_PATH}/backup_sqlite_*.conf` (SQLite)
+
+Multiple instances can be backed up by creating multiple `.conf` files (e.g. `backup_mysql_app1.conf`, `backup_sqlite_app2.conf`).
+
+#### Example: Local MySQL (`backup_mysql_local.conf`)
+```bash
+DB_HOST="localhost"
+AUTH_FILE="/etc/backup/auth_mysql.conf"
+AUTH_USERNAME="backup"
+AUTH_PASSWORD=""
+DUMP_OPTS="-Q --skip-lock-tables --single-transaction"
+IGNORED_DBS="information_schema performance_schema mysql sys"
+DBS=""  # Leave empty to auto-discover all databases
 ```
-cd existing_repo
-git remote add origin https://git.bmaehr.com/open-source/simplelinuxbackup.git
-git branch -M master
-git push -uf origin master
+
+#### Example: Dockerized PostgreSQL (`backup_pgsql_docker.conf`)
+```bash
+DOCKER_CONTAINER="postgres-db"
+DOCKER_USER="postgres"
+DOCKER_SHELL="/bin/sh"
+DOCKER_OPTS=""
+
+DB_HOST="127.0.0.1"
+AUTH_FILE=""
+AUTH_USERNAME="postgres"
+AUTH_PASSWORD="secretpassword"
+IGNORED_DBS="template0 template1 postgres"
+DBS=""
 ```
 
-## Integrate with your tools
+#### Example: Local SQLite (`backup_sqlite_local.conf`)
+```bash
+# Automatically discover *.sqlite, *.sqlite3, *.db in a directory:
+SQLITE_DIR="/var/lib/sqlite"
 
-* [Set up project integrations](https://git.bmaehr.com/open-source/simplelinuxbackup/-/settings/integrations)
+# Or explicitly specify database file paths (space-separated):
+# DBS="/var/lib/sqlite/app.db /var/www/site/data.sqlite3"
+DBS=""
+```
 
-## Collaborate with your team
+#### Example: Dockerized SQLite (`backup_sqlite_docker.conf`)
+```bash
+DOCKER_CONTAINER="app-container"
+DOCKER_SHELL="/bin/sh"
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+# Path inside the container to scan:
+SQLITE_DIR="/app/data"
+DBS=""
+```
 
-## Test and Deploy
+#### Example: Vaultwarden SQLite (`backup_sqlite_vaultwarden.conf`)
+```bash
+# When running on host:
+DBS="/srv/vaultwarden/data/db.sqlite3"
 
-Use the built-in continuous integration in GitLab.
+# When running inside Docker container:
+# DOCKER_CONTAINER="vaultwarden"
+# DOCKER_SHELL="/bin/sh"
+# DBS="/data/db.sqlite3"
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+### 3. Authentication Files
 
-***
+Protect database credentials with secure file permissions (`chmod 600`):
 
-# Editing this README
+* **MySQL (`auth_mysql.conf`)**:
+  ```ini
+  [client]
+  user=backup
+  password="your_password_here"
+  ```
+* **PostgreSQL (`auth_pgsql.conf`)**:
+  ```text
+  # hostname:port:database:username:password
+  localhost:5432:*:postgres:your_password_here
+  ```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+---
 
 ## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### Direct Execution
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```bash
+# Run using .env file or default settings
+./backup.sh
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+# Run with an explicit .env file
+ENV_FILE="/etc/backup/production.env" ./backup.sh
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+# Run with inline environment variables
+DEST="/mnt/storage/backups" SEND_EMAIL=1 NOTIFY_EMAIL="admin@example.com" ./backup.sh
+```
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+### Automated Scheduling
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+#### Option A: Systemd Timer (Recommended)
+
+Systemd timers provide structured journal logging (`journalctl -u simplelinuxbackup`), automatic retry handling, and missed-schedule execution when hosts are offline.
+
+1. Copy the script to `/usr/local/bin/backup.sh` and make it executable:
+   ```bash
+   sudo cp backup.sh /usr/local/bin/backup.sh
+   sudo chmod 755 /usr/local/bin/backup.sh
+   ```
+2. Copy the unit files from `systemd/` to `/etc/systemd/system/`:
+   ```bash
+   sudo cp systemd/simplelinuxbackup.service /etc/systemd/system/
+   sudo cp systemd/simplelinuxbackup.timer /etc/systemd/system/
+   ```
+3. Reload systemd and enable the timer:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now simplelinuxbackup.timer
+   ```
+4. Verify timer status:
+   ```bash
+   systemctl list-timers simplelinuxbackup.timer
+   ```
+
+#### Option B: Cron Job
+
+To run daily at 02:00 AM via cron, add a line to `/etc/crontab` or `crontab -e`:
+
+```cron
+0 2 * * * root /usr/local/bin/backup.sh > /var/log/backup.log 2>&1
+```
+
+---
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+This project is licensed under the [MIT License](LICENSE).
+

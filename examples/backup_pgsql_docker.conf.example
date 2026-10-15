@@ -1,0 +1,23 @@
+# PostgreSQL backup configuration (Docker container instance)
+# Filename pattern must match: backup_pgsql_*.conf
+
+# Docker settings
+DOCKER_CONTAINER="postgres-db"
+DOCKER_USER="postgres"
+DOCKER_SHELL="/bin/sh"
+DOCKER_OPTS=""
+
+DB_HOST="127.0.0.1"
+AUTH_FILE=""
+AUTH_USERNAME="postgres"
+AUTH_PASSWORD="secretpassword"
+
+# Optional: extra options for pg_dump
+DUMP_OPTS=""
+
+# Databases to ignore when discovering automatically
+IGNORED_DBS="template0 template1 postgres"
+
+# Optional: explicitly specify databases to back up separated by space.
+# Leave empty to automatically discover all accessible databases.
+DBS=""

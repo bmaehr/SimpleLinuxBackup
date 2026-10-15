@@ -1,0 +1,5 @@
+# List of directories to back up (one per line)
+# Lines starting with # and empty lines are ignored.
+/etc
+/var/www
+/home

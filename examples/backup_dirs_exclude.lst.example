@@ -1,0 +1,7 @@
+# Exclude patterns for tar (one per line)
+# Passed to tar via --exclude-from
+*.log
+*.tmp
+cache/
+.cache/
+node_modules/

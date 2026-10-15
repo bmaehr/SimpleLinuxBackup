@@ -1,0 +1,23 @@
+# MySQL / MariaDB backup configuration (Docker container instance)
+# Filename pattern must match: backup_mysql_*.conf
+
+# Docker settings
+DOCKER_CONTAINER="mysql-db"
+DOCKER_USER=""
+DOCKER_SHELL="/bin/sh"
+DOCKER_OPTS=""
+
+DB_HOST="127.0.0.1"
+AUTH_FILE=""
+AUTH_USERNAME="root"
+AUTH_PASSWORD="secretpassword"
+
+# Optional: extra options for mysqldump
+DUMP_OPTS="-Q --skip-lock-tables --single-transaction"
+
+# Databases to ignore when discovering automatically
+IGNORED_DBS="information_schema performance_schema mysql sys"
+
+# Optional: explicitly specify databases to back up separated by space.
+# Leave empty to automatically discover all accessible databases.
+DBS=""

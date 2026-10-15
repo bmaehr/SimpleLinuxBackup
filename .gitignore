@@ -1,0 +1,23 @@
+# Environment files
+.env
+.env.*
+!.env.example
+!*.example
+
+# Local configuration lists
+*.lst
+
+# Temporary / Log files
+*.log
+*.tmp
+*.msg
+
+# Archive outputs
+*.tar.gz
+*.gz
+
+# System / Editor files
+.DS_Store
+Thumbs.db
+*~
+*.swp

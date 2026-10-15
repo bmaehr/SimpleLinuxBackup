@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily SimpleLinuxBackup Timer
+Documentation=https://git.bmaehr.com/open-source/simplelinuxbackup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

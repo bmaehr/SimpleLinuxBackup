@@ -1,0 +1,17 @@
+# PostgreSQL backup configuration (Local instance)
+# Filename pattern must match: backup_pgsql_*.conf
+
+DB_HOST="localhost"
+AUTH_FILE="${CONF_PATH}/auth_pgsql.conf"
+AUTH_USERNAME="postgres"
+AUTH_PASSWORD=""
+
+# Optional: extra options for pg_dump
+DUMP_OPTS=""
+
+# Databases to ignore when discovering automatically
+IGNORED_DBS="template0 template1 postgres"
+
+# Optional: explicitly specify databases to back up separated by space.
+# Leave empty to automatically discover all accessible databases.
+DBS=""

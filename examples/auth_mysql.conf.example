@@ -1,0 +1,5 @@
+# Example MySQL client authentication file (--defaults-extra-file)
+# Permissions should be: chmod 600 auth_mysql.conf
+[client]
+user=backup
+password="your_password_here"

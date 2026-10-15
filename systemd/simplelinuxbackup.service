@@ -1,0 +1,18 @@
+[Unit]
+Description=SimpleLinuxBackup Automated Backup Service
+Documentation=https://git.bmaehr.com/open-source/simplelinuxbackup
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/backup/.env
+ExecStart=/usr/local/bin/backup.sh
+Nice=19
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
