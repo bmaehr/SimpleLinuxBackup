@@ -416,6 +416,25 @@ backup_databases() {
       fi
     fi
 
+    # If running inside a Docker container, binary commands should resolve inside the container's PATH
+    if [[ -n "${DOCKER_CONTAINER}" ]]; then
+      if [[ "${LIST_COMMAND}" == "${LIST_COMMAND_MYSQL}" || -z "${LIST_COMMAND}" ]] && [[ "$type" == "mysql" ]]; then
+        LIST_COMMAND="mysql"
+      fi
+      if [[ "${DUMP_COMMAND}" == "${DUMP_COMMAND_MYSQL}" || -z "${DUMP_COMMAND}" ]] && [[ "$type" == "mysql" ]]; then
+        DUMP_COMMAND="mysqldump"
+      fi
+      if [[ "${LIST_COMMAND}" == "${LIST_COMMAND_PGSQL}" || -z "${LIST_COMMAND}" ]] && [[ "$type" == "pgsql" ]]; then
+        LIST_COMMAND="psql"
+      fi
+      if [[ "${DUMP_COMMAND}" == "${DUMP_COMMAND_PGSQL}" || -z "${DUMP_COMMAND}" ]] && [[ "$type" == "pgsql" ]]; then
+        DUMP_COMMAND="pg_dump"
+      fi
+      if [[ "${DUMP_COMMAND}" == "${DUMP_COMMAND_SQLITE}" || -z "${DUMP_COMMAND}" ]] && [[ "$type" == "sqlite" ]]; then
+        DUMP_COMMAND="sqlite3"
+      fi
+    fi
+
     # Verify required database binaries are available
     if [[ -z "${DOCKER_CONTAINER}" ]]; then
       if [[ "$type" == "sqlite" && -z "${DUMP_COMMAND_SQLITE}" ]]; then
@@ -442,6 +461,17 @@ backup_databases() {
       fi
       if ! run_inner "command -v '${check_bin}'" &>/dev/null; then
         local msg="Skipping ${conf}: '${check_bin}' is not installed inside Docker container '${DOCKER_CONTAINER}'."
+        log_error "${msg}"
+        continue
+      fi
+      local check_list_bin=""
+      if [[ "$type" == "mysql" ]]; then
+        check_list_bin="${LIST_COMMAND:-mysql}"
+      elif [[ "$type" == "pgsql" ]]; then
+        check_list_bin="${LIST_COMMAND:-psql}"
+      fi
+      if [[ -n "${check_list_bin}" ]] && ! run_inner "command -v '${check_list_bin}'" &>/dev/null; then
+        local msg="Skipping ${conf}: '${check_list_bin}' is not installed inside Docker container '${DOCKER_CONTAINER}'."
         log_error "${msg}"
         continue
       fi
@@ -490,17 +520,32 @@ backup_databases() {
         fi
       fi
 
+      # Determine database to connect to for connection test and discovery
+      local connect_db="${PGDATABASE:-${DBS%% *}}"
+      if [[ -z "${connect_db}" ]]; then
+        connect_db="postgres"
+      fi
+
       # Verify PostgreSQL connection & credentials
-      local test_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c 'SELECT 1;'"
-      local test_out
-      if ! test_out="$(run_inner "${test_cmd}" 2>&1)"; then
+      local test_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -d '${connect_db}' -At -c 'SELECT 1;'"
+      local test_out test_rc=0
+      test_out="$(run_inner "${test_cmd}" 2>&1)" || test_rc=$?
+
+      # If default 'postgres' database failed because it does not exist, try 'template1'
+      if [[ ${test_rc} -ne 0 && -z "${PGDATABASE:-}" && -z "${DBS:-}" && "${test_out}" == *"database \"postgres\" does not exist"* ]]; then
+        connect_db="template1"
+        test_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -d '${connect_db}' -At -c 'SELECT 1;'"
+        test_out="$(run_inner "${test_cmd}" 2>&1)" || test_rc=$?
+      fi
+
+      if [[ ${test_rc} -ne 0 ]]; then
         log_error "Skipping ${conf}: PostgreSQL login on '${DB_HOST}' failed: ${test_out}"
         continue
       elif [ "${VERIFY_CONFIG:-0}" -eq 1 ]; then
-        echo "  [OK] PostgreSQL login on '${DB_HOST}' successful."
+        echo "  [OK] PostgreSQL login on '${DB_HOST}' (database: ${connect_db}) successful."
       fi
 
-      discovery_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false;\""
+      discovery_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -d '${connect_db}' -At -c \"SELECT datname FROM pg_database WHERE datistemplate = false;\""
     else
       if [[ -n "${SQLITE_DIR}" ]]; then
         discovery_cmd="find '${SQLITE_DIR}' -maxdepth 3 -type f \\( -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \\)"
@@ -543,6 +588,9 @@ backup_databases() {
         done
       elif [[ "$type" == "mysql" ]]; then
         for db_name in ${DBS}; do
+          if should_skip_db "${db_name}" ${IGNORED_DBS}; then
+            continue
+          fi
           local check_db_cmd="${LIST_COMMAND} ${AUTH_ADD} -h '${DB_HOST}' -Bse 'USE \`${db_name}\`;'"
           local check_out
           if check_out="$(run_inner "${check_db_cmd}" 2>&1)"; then
@@ -553,6 +601,9 @@ backup_databases() {
         done
       elif [[ "$type" == "pgsql" ]]; then
         for db_name in ${DBS}; do
+          if should_skip_db "${db_name}" ${IGNORED_DBS}; then
+            continue
+          fi
           local check_db_cmd="${AUTH_ADD} ${LIST_COMMAND} -w -U '${AUTH_USERNAME}' -h '${DB_HOST}' -d '${db_name}' -At -c 'SELECT 1;'"
           local check_out
           if check_out="$(run_inner "${check_db_cmd}" 2>&1)"; then
